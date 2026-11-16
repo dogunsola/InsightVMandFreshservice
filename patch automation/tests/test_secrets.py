@@ -2,40 +2,41 @@ import os
 import unittest
 from unittest.mock import patch
 
-from rapid7_automox_sync.secrets import (
+from rapid7_freshservice_sync.secrets import (
     AzureKeyVaultSecretProvider,
     EnvSecretProvider,
     default_secret_name,
     validate_key_vault_url,
 )
-from rapid7_automox_sync.cli import required_positive_int
 
 
 class SecretTests(unittest.TestCase):
     def test_env_provider_reads_required_secret(self) -> None:
-        with patch.dict(os.environ, {"RAPID7_API_KEY": " key "}, clear=True):
-            self.assertEqual(EnvSecretProvider().get_required("RAPID7_API_KEY"), "key")
+        with patch.dict(os.environ, {"FRESHSERVICE_API_KEY": " key "}, clear=True):
+            self.assertEqual(EnvSecretProvider().get_required("FRESHSERVICE_API_KEY"), "key")
 
     def test_env_provider_fails_without_secret(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(SystemExit):
-                EnvSecretProvider().get_required("RAPID7_API_KEY")
+                EnvSecretProvider().get_required("FRESHSERVICE_API_KEY")
 
     def test_default_secret_names_match_source(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(
-                default_secret_name("env", "RAPID7_API_KEY", "rapid7-api-key"),
-                "RAPID7_API_KEY",
+                default_secret_name("env", "FRESHSERVICE_API_KEY", "freshservice-api-key"),
+                "FRESHSERVICE_API_KEY",
             )
             self.assertEqual(
-                default_secret_name("azure-keyvault", "RAPID7_API_KEY", "rapid7-api-key"),
-                "rapid7-api-key",
+                default_secret_name("azure-keyvault", "FRESHSERVICE_API_KEY", "freshservice-api-key"),
+                "freshservice-api-key",
             )
 
     def test_default_secret_name_can_be_overridden_by_env(self) -> None:
-        with patch.dict(os.environ, {"RAPID7_API_KEY_SECRET": "custom-name"}, clear=True):
+        with patch.dict(os.environ, {"FRESHSERVICE_API_KEY_SECRET": "custom-name"}, clear=True):
             self.assertEqual(
-                default_secret_name("azure-keyvault", "RAPID7_API_KEY", "rapid7-api-key"),
+                default_secret_name(
+                    "azure-keyvault", "FRESHSERVICE_API_KEY", "freshservice-api-key"
+                ),
                 "custom-name",
             )
 
@@ -66,12 +67,6 @@ class SecretTests(unittest.TestCase):
         provider = object.__new__(AzureKeyVaultSecretProvider)
         with self.assertRaises(SystemExit):
             provider.get_required(" ")
-
-    def test_required_positive_int_has_clear_failure(self) -> None:
-        self.assertEqual(required_positive_int("42", "Automox organization ID"), 42)
-        with self.assertRaises(SystemExit):
-            required_positive_int("not-a-number", "Automox organization ID")
-
 
 if __name__ == "__main__":
     unittest.main()

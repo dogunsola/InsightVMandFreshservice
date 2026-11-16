@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, order=True)
-class AutomoxFinding:
+class Finding:
     hosts: tuple[str, ...]
     solution: str
     fix_details: str

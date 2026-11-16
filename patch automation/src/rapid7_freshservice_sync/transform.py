@@ -6,9 +6,9 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from .models import AutomoxFinding, TransformStats
+from .models import Finding, TransformStats
 
-SEVERITY_MAP = {"critical": "critical", "severe": "high"}
+QUALIFYING_SEVERITIES = {"critical", "severe"}
 ACTIVE_FINDING_FIELDS = ("new", "same")
 CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 MICROSOFT_TOKENS = ("microsoft", "windows", "office", "azure", "sql server")
@@ -20,8 +20,8 @@ def build_catalog(
     catalog: dict[str, tuple[str, str, str, str]] = {}
     for vulnerability in vulnerabilities:
         vulnerability_id = str(vulnerability.get("id", "")).strip()
-        severity = SEVERITY_MAP.get(str(vulnerability.get("severity", "")).lower())
-        if not vulnerability_id or not severity:
+        severity = str(vulnerability.get("severity", "")).lower()
+        if not vulnerability_id or severity not in QUALIFYING_SEVERITIES:
             continue
         software = str(vulnerability.get("name") or vulnerability.get("title") or "Unknown Service")
         software = _normalize_software_name(software)
@@ -38,7 +38,7 @@ def transform_assets(
     catalog: dict[str, tuple[str, str, str, str]],
     hostname_fallback: str = "skip",
     solution_lookup: Callable[[str], list[dict[str, Any]]] | None = None,
-) -> tuple[list[AutomoxFinding], TransformStats]:
+) -> tuple[list[Finding], TransformStats]:
     findings: dict[tuple[str, str], dict[str, Any]] = {}
     assets_seen = 0
     assets_without_host = 0
@@ -79,7 +79,7 @@ def transform_assets(
                     group["hosts"].add(host)
 
     ordered = [
-        AutomoxFinding(
+        Finding(
             hosts=tuple(sorted(entry["hosts"])),
             solution=entry["solution"],
             fix_details=entry["fix_details"],
@@ -94,7 +94,7 @@ def transform_assets(
     )
 
 
-def write_automox_csv(path: Path, findings: Iterable[AutomoxFinding]) -> None:
+def write_findings_csv(path: Path, findings: Iterable[Finding]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{path.name}.",

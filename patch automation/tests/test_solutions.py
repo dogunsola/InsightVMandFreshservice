@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import Mock
 
-from rapid7_automox_sync.rapid7 import Rapid7SolutionClient
-from rapid7_automox_sync.transform import build_catalog, transform_assets
+from rapid7_freshservice_sync.rapid7 import Rapid7SolutionClient
+from rapid7_freshservice_sync.transform import build_catalog, transform_assets
 
 
 class SolutionTests(unittest.TestCase):

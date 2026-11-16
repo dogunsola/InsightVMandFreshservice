@@ -3,7 +3,7 @@ pr: none
 
 schedules:
   - cron: "0 6 * * *"
-    displayName: Daily Rapid7 to Automox sync
+    displayName: Daily Rapid7 to Freshservice sync
     branches:
       include:
         - main
@@ -19,7 +19,7 @@ pool:
 
 jobs:
   - job: sync
-    displayName: Run Rapid7 to Automox sync
+    displayName: Run Rapid7 to Freshservice sync
     steps:
       - checkout: self
 
@@ -43,30 +43,31 @@ jobs:
         inputs:
           azureSubscription: "Patch Automation"
           KeyVaultName: "kv-patch-automation"
-          SecretsFilter: "*"
+          SecretsFilter: "rapid7-console-username,rapid7-console-password,freshservice-api-key,freshservice-requester-email"
           RunAsPreJob: true
 
       - script: |
           set -euo pipefail
           cd "patch automation"
 
-          rapid7-automox-sync \
+          rapid7-freshservice-sync \
             --secret-source env \
             --page-size 250 \
-            --output "$(Build.ArtifactStagingDirectory)/rapid7-findings.csv" \
-            --upload \
+            --output "$(Build.ArtifactStagingDirectory)/rapid7-freshservice-findings.csv" \
+            --create-tickets \
             --verbose
         displayName: Run sync job
         env:
           RAPID7_CONSOLE_URL: $(Rapid7-Console-URL)
           RAPID7_CONSOLE_USERNAME: $(Rapid7-Console-Username)
           RAPID7_CONSOLE_PASSWORD: $(Rapid7-Console-Password)
-          AUTOMOX_API_KEY: $(Automox-Secret)
-          AUTOMOX_ORG_ID: $(Automox-Org-ID)
+          FRESHSERVICE_DOMAIN: $(Freshservice-Domain)
+          FRESHSERVICE_API_KEY: $(Freshservice-API-Key)
+          FRESHSERVICE_REQUESTER_EMAIL: $(Freshservice-Requester-Email)
 
       - task: PublishPipelineArtifact@1
         displayName: Publish CSV output
         inputs:
-          targetPath: "$(Build.ArtifactStagingDirectory)/rapid7-findings.csv"
-          artifact: "rapid7-findings"
+          targetPath: "$(Build.ArtifactStagingDirectory)/rapid7-freshservice-findings.csv"
+          artifact: "rapid7-freshservice-findings"
         condition: succeededOrFailed()

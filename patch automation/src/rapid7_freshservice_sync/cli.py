@@ -4,10 +4,10 @@ import os
 import stat
 from pathlib import Path
 
-from .automox import AutomoxClient
+from .freshservice import FreshserviceClient
 from .rapid7 import Rapid7Client
 from .secrets import AzureKeyVaultSecretProvider, EnvSecretProvider, default_secret_name
-from .transform import build_catalog, transform_assets, write_automox_csv
+from .transform import build_catalog, transform_assets, write_findings_csv
 
 LOG = logging.getLogger(__name__)
 
@@ -22,13 +22,6 @@ def positive_int(value: str) -> int:
     return parsed
 
 
-def required_positive_int(value: str, label: str) -> int:
-    try:
-        return positive_int(value)
-    except argparse.ArgumentTypeError as exc:
-        raise SystemExit(f"{label} must be a positive integer") from exc
-
-
 def safe_output_path(path: Path) -> Path:
     if path.exists() and path.is_symlink():
         raise SystemExit("Refusing to write output through a symbolic link")
@@ -37,7 +30,7 @@ def safe_output_path(path: Path) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export critical and severe InsightVM findings to Automox."
+        description="Export InsightVM findings and create Freshservice tickets."
     )
     parser.add_argument("--asset-group", default="workstations/laptops",
                         help="Exact Security Console asset group name")
@@ -45,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("rapid7-findings.csv"),
+        default=Path("rapid7-freshservice-findings.csv"),
         help="CSV output path",
     )
     parser.add_argument(
@@ -55,9 +48,9 @@ def parse_args() -> argparse.Namespace:
         help="Behavior when an InsightVM asset has no hostname",
     )
     parser.add_argument(
-        "--upload",
+        "--create-tickets",
         action="store_true",
-        help="Upload the generated CSV to Automox Vulnerability Sync",
+        help="Create Freshservice tickets for findings not already open",
     )
     parser.add_argument(
         "--secret-source",
@@ -71,14 +64,19 @@ def parse_args() -> argparse.Namespace:
         help="Azure Key Vault URL when --secret-source azure-keyvault is used",
     )
     parser.add_argument(
-        "--automox-api-key-secret",
+        "--freshservice-api-key-secret",
         default=None,
-        help="Secret name for the Automox API key",
+        help="Secret name for the Freshservice API key",
     )
     parser.add_argument(
-        "--automox-org-id-secret",
+        "--freshservice-requester-email-secret",
         default=None,
-        help="Secret name for the Automox organization ID",
+        help="Secret name for the Freshservice requester email",
+    )
+    parser.add_argument(
+        "--freshservice-domain",
+        default=os.environ.get("FRESHSERVICE_DOMAIN", ""),
+        help="Freshservice HTTPS domain, e.g. https://company.freshservice.com",
     )
     parser.add_argument("--console-url", default=os.environ.get("RAPID7_CONSOLE_URL", ""),
                         help="Security Console HTTPS origin, e.g. https://console:3780")
@@ -105,13 +103,6 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     secrets = build_secret_provider(args)
-    automox_api_key_secret = args.automox_api_key_secret or default_secret_name(
-        args.secret_source, "AUTOMOX_API_KEY", "automox-api-key"
-    )
-    automox_org_id_secret = args.automox_org_id_secret or default_secret_name(
-        args.secret_source, "AUTOMOX_ORG_ID", "automox-org-id"
-    )
-
     if not args.console_url:
         raise SystemExit("--console-url or RAPID7_CONSOLE_URL is required for Rapid7 API access")
     rapid7 = Rapid7Client(
@@ -135,7 +126,7 @@ def main() -> None:
         solution_lookup=rapid7.get_vulnerability_solutions,
     )
     args.output = safe_output_path(args.output)
-    write_automox_csv(args.output, findings)
+    write_findings_csv(args.output, findings)
     LOG.info("Wrote %s unique findings to %s", len(findings), args.output)
     LOG.info(
         "Summary: assets=%s, no-host=%s, unknown-vulnerability-id=%s",
@@ -144,23 +135,43 @@ def main() -> None:
         stats.vulnerability_ids_not_in_catalog,
     )
 
-    if args.upload:
-        if not findings:
-            raise SystemExit("CSV has no findings; refusing to upload an empty report")
-        automox = AutomoxClient(
-            api_key=secrets.get_required(automox_api_key_secret),
-            organization_id=required_positive_int(
-                secrets.get_required(automox_org_id_secret), "Automox organization ID"
+    if args.create_tickets:
+        if not args.freshservice_domain:
+            raise SystemExit(
+                "--freshservice-domain or FRESHSERVICE_DOMAIN is required to create tickets"
+            )
+        freshservice = FreshserviceClient(
+            domain=args.freshservice_domain,
+            api_key=secrets.get_required(
+                args.freshservice_api_key_secret
+                or default_secret_name(
+                    args.secret_source,
+                    "FRESHSERVICE_API_KEY",
+                    "freshservice-api-key",
+                )
+            ),
+            requester_email=secrets.get_required(
+                args.freshservice_requester_email_secret
+                or default_secret_name(
+                    args.secret_source,
+                    "FRESHSERVICE_REQUESTER_EMAIL",
+                    "freshservice-requester-email",
+                )
             ),
         )
-        result = automox.upload_rapid7_csv(args.output)
-        LOG.info(
-            "Automox accepted action set id=%s status=%s",
-            result.get("id", "unknown"),
-            result.get("status", "unknown"),
-        )
+        created = 0
+        skipped = 0
+        for finding in findings:
+            ticket = freshservice.create_ticket_if_missing(finding)
+            if ticket is None:
+                skipped += 1
+                LOG.info("Skipping existing open Freshservice ticket for %s", finding.solution)
+            else:
+                created += 1
+                LOG.info("Created Freshservice ticket id=%s", ticket["id"])
+        LOG.info("Freshservice tickets: created=%s, already-open=%s", created, skipped)
     else:
-        LOG.info("Dry run complete; use --upload to send this CSV to Automox")
+        LOG.info("Dry run complete; use --create-tickets to create Freshservice tickets")
 
     try:
         mode = stat.S_IMODE(args.output.stat().st_mode)

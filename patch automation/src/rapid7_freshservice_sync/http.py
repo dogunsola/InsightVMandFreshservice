@@ -37,6 +37,7 @@ class HttpClient:
         body: bytes | None = None,
         headers: dict[str, str] | None = None,
         timeout: int = 120,
+        retryable: bool = True,
     ) -> Any:
         if params:
             url = f"{url}?{urlencode(params)}"
@@ -47,7 +48,8 @@ class HttpClient:
             request_headers["Content-Type"] = "application/json"
         request = Request(url, data=body, headers=request_headers, method=method)
 
-        for attempt in range(self.retries + 1):
+        max_retries = self.retries if retryable else 0
+        for attempt in range(max_retries + 1):
             try:
                 with urlopen(request, timeout=timeout, context=self.ssl_context) as response:
                     raw = response.read(MAX_RESPONSE_BYTES + 1)
@@ -59,14 +61,14 @@ class HttpClient:
                     raise ApiError(f"{url} returned invalid JSON") from exc
             except HTTPError as exc:
                 response_body = exc.read().decode("utf-8", errors="replace")[:1000]
-                if exc.code not in {429, 500, 502, 503, 504} or attempt >= self.retries:
+                if exc.code not in {429, 500, 502, 503, 504} or attempt >= max_retries:
                     raise ApiError(
                         f"{method} {url} returned {exc.code}: {response_body}"
                     ) from exc
                 retry_after = exc.headers.get("Retry-After")
                 delay = min(max(float(retry_after), 0), 60) if retry_after else 2**attempt
             except URLError as exc:
-                if attempt >= self.retries:
+                if attempt >= max_retries:
                     raise ApiError(f"{method} {url} failed: {exc.reason}") from exc
                 delay = 2**attempt
             time.sleep(delay)

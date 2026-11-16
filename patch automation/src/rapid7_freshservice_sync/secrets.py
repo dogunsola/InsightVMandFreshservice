@@ -25,7 +25,7 @@ class AzureKeyVaultSecretProvider:
         except ImportError as exc:
             raise SystemExit(
                 "Azure Key Vault support is not installed. "
-                "Install with: python -m pip install 'rapid7-automox-sync[azure]'"
+                "Install with: python -m pip install 'rapid7-freshservice-sync[azure]'"
             ) from exc
 
         self.client = SecretClient(

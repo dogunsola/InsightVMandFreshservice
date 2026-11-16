@@ -1,11 +1,10 @@
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import Mock
 
-from rapid7_automox_sync.automox import AutomoxClient, _safe_filename
-from rapid7_automox_sync.http import ApiError, HttpClient
-from rapid7_automox_sync.rapid7 import Rapid7Client
+from rapid7_freshservice_sync.freshservice import FreshserviceClient, finding_tag
+from rapid7_freshservice_sync.http import ApiError, HttpClient
+from rapid7_freshservice_sync.models import Finding
+from rapid7_freshservice_sync.rapid7 import Rapid7Client
 
 class ClientTests(unittest.TestCase):
     def test_console_assets_pagination_membership_and_active_findings(self) -> None:
@@ -70,24 +69,56 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(list(client.iter_affected_assets()), [])
         self.assertEqual(http.request_json.call_count, 2)
 
-    def test_automox_upload_uses_rapid7_format(self) -> None:
+    def test_freshservice_creates_tagged_ticket_when_no_open_duplicate_exists(self) -> None:
         http = Mock()
-        http.request_json.return_value = {"id": 123, "status": "building"}
-        client = AutomoxClient("key", 42, http=http)
+        http.request_json.side_effect = [
+            {"tickets": [], "total": 0},
+            {"tickets": [], "total": 0},
+            {"ticket": {"id": 123, "status": 2}},
+        ]
+        client = FreshserviceClient(
+            "https://example.freshservice.com", "api-key", "security@example.com", http=http
+        )
+        finding = Finding(("host.example.com",), "Upgrade", "Install 2.0")
 
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "findings.csv"
-            path.write_text("Hosts,Solution,Fix details\nhost,Upgrade,Install 2.0\n")
-            result = client.upload_rapid7_csv(path)
+        result = client.create_ticket_if_missing(finding)
 
         self.assertEqual(result["id"], 123)
-        kwargs = http.request_json.call_args.kwargs
-        self.assertEqual(kwargs["params"], {"source": "rapid7"})
-        self.assertIn(b'name="format"\r\n\r\nrapid7', kwargs["body"])
-        self.assertIn(b"Hosts,Solution,Fix details", kwargs["body"])
+        calls = http.request_json.call_args_list
+        self.assertEqual(calls[0].args, ("GET", "https://example.freshservice.com/api/v2/tickets/filter"))
+        self.assertEqual(calls[0].kwargs["params"]["query"], f"tag: '{finding_tag(finding)}' AND status:2")
+        self.assertEqual(calls[1].kwargs["params"]["query"], f"tag: '{finding_tag(finding)}' AND status:3")
+        self.assertEqual(calls[2].kwargs["json_body"]["email"], "security@example.com")
+        self.assertEqual(calls[2].kwargs["json_body"]["status"], 2)
+        self.assertEqual(calls[2].kwargs["json_body"]["priority"], 3)
+        self.assertIn(finding_tag(finding), calls[2].kwargs["json_body"]["tags"])
+        self.assertFalse(calls[2].kwargs["retryable"])
+        self.assertEqual(client.http, http)
 
-    def test_multipart_filename_is_sanitized(self) -> None:
-        self.assertEqual(_safe_filename('bad"\r\nname.csv'), "bad___name.csv")
+    def test_freshservice_skips_matching_open_ticket(self) -> None:
+        http = Mock()
+        http.request_json.return_value = {"tickets": [{"id": 456, "status": 2}], "total": 1}
+        client = FreshserviceClient(
+            "https://example.freshservice.com", "api-key", "security@example.com", http=http
+        )
+
+        self.assertIsNone(
+            client.create_ticket_if_missing(Finding(("host.example.com",), "Upgrade", "Install 2.0"))
+        )
+        self.assertEqual(http.request_json.call_count, 1)
+
+    def test_freshservice_domain_and_credentials_are_validated(self) -> None:
+        for domain in (
+            "http://example.freshservice.com",
+            "https://example.freshservice.com.evil.test",
+            "https://custom.example.com",
+        ):
+            with self.subTest(domain=domain), self.assertRaises(ValueError):
+                FreshserviceClient(domain, "api-key", "security@example.com")
+        with self.assertRaises(ValueError):
+            FreshserviceClient("https://example.freshservice.com", "", "security@example.com")
+        with self.assertRaises(ValueError):
+            FreshserviceClient("https://example.freshservice.com", "api-key", "")
 
     def test_http_client_rejects_unexpected_urls(self) -> None:
         http = HttpClient(allowed_hosts={"api.example.com"})

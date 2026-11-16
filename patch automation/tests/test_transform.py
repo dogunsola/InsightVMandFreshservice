@@ -4,11 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rapid7_automox_sync.models import AutomoxFinding
-from rapid7_automox_sync.transform import (
+from rapid7_freshservice_sync.models import Finding
+from rapid7_freshservice_sync.transform import (
     build_catalog,
     transform_assets,
-    write_automox_csv,
+    write_findings_csv,
 )
 
 
@@ -39,14 +39,14 @@ class TransformTests(unittest.TestCase):
             catalog,
             {
                 "vuln-1": ("critical", "Example Service", "Upgrade Example Service", "Install version 2.0"),
-                "vuln-2": ("high", "Example Service", "Apply vendor update", "Restart the service"),
+                "vuln-2": ("severe", "Example Service", "Apply vendor update", "Restart the service"),
             },
         )
 
     def test_transform_uses_active_findings_and_deduplicates(self) -> None:
         catalog = {
             "vuln-1": ("critical", "Example Service", "Upgrade", "Install 2.0"),
-            "no-cve": ("high", "Example Service", "Upgrade", "Install 2.0"),
+            "no-cve": ("severe", "Example Service", "Upgrade", "Install 2.0"),
             "microsoft": ("critical", "Microsoft Windows Server", "Update Windows", "Install patch"),
         }
         assets = [
@@ -67,7 +67,7 @@ class TransformTests(unittest.TestCase):
         self.assertEqual(
             findings,
             [
-                AutomoxFinding(
+                Finding(
                     hosts=("host.example.com", "host2.example.com"),
                     solution="Upgrade",
                     fix_details="Install 2.0",
@@ -86,7 +86,7 @@ class TransformTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "findings.csv"
-            write_automox_csv(output, findings)
+            write_findings_csv(output, findings)
             with output.open(newline="", encoding="utf-8") as file:
                 rows = list(csv.reader(file))
         self.assertEqual(
@@ -99,7 +99,7 @@ class TransformTests(unittest.TestCase):
 
     def test_csv_formula_cells_are_escaped_and_file_is_private(self) -> None:
         findings = [
-            AutomoxFinding(
+            Finding(
                 hosts=("host.example.com",),
                 solution="=cmd|calc",
                 fix_details="Install 2.0",
@@ -107,7 +107,7 @@ class TransformTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "findings.csv"
-            write_automox_csv(output, findings)
+            write_findings_csv(output, findings)
             with output.open(newline="", encoding="utf-8") as file:
                 rows = list(csv.reader(file))
             mode = stat.S_IMODE(output.stat().st_mode)
