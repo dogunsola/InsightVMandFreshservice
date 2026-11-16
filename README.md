@@ -81,7 +81,8 @@ your retention policy.
 
 ## Azure Pipelines
 
-The scheduled pipeline runs the tests and sync daily. Configure these variables
+The scheduled pipeline runs the tests and sync every Monday at 06:00 UTC.
+Configure these variables
 in the existing `Patch Automation` variable group and Key Vault:
 
 - `Rapid7-Console-URL`
