@@ -21,21 +21,39 @@ class ConsoleExportTests(unittest.TestCase):
             ]),
             ('GET', '/asset_groups'): page([{'id': 8, 'name': 'workstations/laptops'}]),
             ('GET', '/asset_groups/8/assets'): {'resources': [42]},
-            ('POST', '/assets/search'): page([{'id': 42, 'hostName': 'laptop.example'}]),
+            ('POST', '/assets/search'): page([{
+                'id': 42,
+                'hostName': 'laptop.example',
+                'ip': '192.0.2.10',
+            }]),
             ('GET', '/assets/42/vulnerabilities'): page([
                 {'id': 'apache-vuln', 'status': 'vulnerable'},
                 {'id': 'moderate', 'status': 'vulnerable'},
                 {'id': 'ms', 'status': 'vulnerable'},
                 {'id': 'exception', 'status': 'invulnerable'},
             ]),
-            ('GET', '/vulnerabilities/apache-vuln/solutions'): {'resources': ['apache-upgrade']},
+            ('GET', '/assets/42/vulnerabilities/apache-vuln'): {
+                'results': [{
+                    'checkId': 'apache-check',
+                    'status': 'vulnerable-version',
+                    'proof': '<p>Apache version 2.4.0</p>',
+                }],
+            },
+            ('GET', '/vulnerabilities/apache-vuln/solutions'): {
+                'resources': ['apache-upgrade', 'apache-configure'],
+            },
             ('GET', '/solutions/apache-upgrade'): {
                 'summary': {'text': 'Upgrade Apache'}, 'steps': {'text': 'Install latest release'},
+            },
+            ('GET', '/solutions/apache-configure'): {
+                'summary': {'text': 'Configure Apache'}, 'steps': {'text': 'Disable legacy module'},
             },
             ('POST', '/tickets'): {'ticket': {'id': 100, 'status': 2}},
         }
         seen = []
         filter_requests = 0
+        ticket_bodies = []
+        routing_requests = []
 
         def request(client, method, url, **kwargs):
             nonlocal filter_requests
@@ -52,10 +70,36 @@ class ConsoleExportTests(unittest.TestCase):
             if key == ('GET', '/tickets/filter'):
                 filter_requests += 1
                 return {'tickets': [], 'total': 0}
+            if key == ('GET', '/workspaces'):
+                routing_requests.append(key)
+                return {'workspaces': [{
+                    'id': 42,
+                    'name': 'IT, Banking Support & Marketing',
+                }]}
+            if key == ('GET', '/groups'):
+                self.assertEqual(kwargs['params']['workspace_id'], 42)
+                routing_requests.append(key)
+                return {'groups': [{'id': 84, 'name': 'Service Desk'}]}
             if key == ('POST', '/tickets'):
                 seen.append(key)
                 self.assertEqual(kwargs['json_body']['email'], 'security@example.com')
                 self.assertEqual(kwargs['json_body']['status'], 2)
+                self.assertEqual(kwargs['json_body']['urgency'], 2)
+                self.assertEqual(kwargs['json_body']['impact'], 2)
+                self.assertEqual(kwargs['json_body']['priority'], 2)
+                self.assertEqual(kwargs['json_body']['workspace_id'], 42)
+                self.assertEqual(kwargs['json_body']['group_id'], 84)
+                self.assertEqual(kwargs['json_body']['category'], 'Digital Security')
+                self.assertEqual(kwargs['json_body']['sub_category'], 'Vulnerability Management')
+                description = kwargs['json_body']['description']
+                self.assertIn('<h2>Rapid7 Remediation Details</h2>', description)
+                self.assertIn('<th>Asset ID</th><th>Hostname</th>', description)
+                self.assertIn('laptop.example', description)
+                self.assertIn('192.0.2.10', description)
+                self.assertIn(kwargs['json_body']['subject'], description)
+                self.assertIn('<h2>Rapid7 Proof by Asset</h2>', description)
+                self.assertIn('&lt;p&gt;Apache version 2.4.0&lt;/p&gt;', description)
+                ticket_bodies.append(kwargs['json_body'])
                 return responses[key]
             self.fail(f'Unexpected Freshservice request: {method} {url}')
         with tempfile.TemporaryDirectory() as directory:
@@ -74,8 +118,29 @@ class ConsoleExportTests(unittest.TestCase):
                 main()
             with output.open(newline='') as file:
                 self.assertEqual(list(csv.reader(file)), [
-                    ['Hosts', 'Solution', 'Fix details'],
-                    ['laptop.example', 'Upgrade Apache', 'Install latest release'],
+                    ['Hosts', 'Solution', 'Fix details', 'Proof information'],
+                    [
+                        'laptop.example', 'Configure Apache', 'Disable legacy module',
+                        'Asset: laptop.example (ID 42); Vulnerability: apache-vuln; '
+                        'Check: apache-check; Status: vulnerable-version; '
+                        'Proof: <p>Apache version 2.4.0</p>',
+                    ],
+                    [
+                        'laptop.example', 'Upgrade Apache', 'Install latest release',
+                        'Asset: laptop.example (ID 42); Vulnerability: apache-vuln; '
+                        'Check: apache-check; Status: vulnerable-version; '
+                        'Proof: <p>Apache version 2.4.0</p>',
+                    ],
                 ])
         self.assertEqual(set(seen), set(responses))
-        self.assertEqual(filter_requests, 2)
+        self.assertEqual(filter_requests, 4)
+        self.assertEqual(len(ticket_bodies), 2)
+        self.assertEqual(
+            {body['subject'] for body in ticket_bodies},
+            {'Configure Apache', 'Upgrade Apache'},
+        )
+        self.assertNotEqual(ticket_bodies[0]['tags'], ticket_bodies[1]['tags'])
+        self.assertEqual(routing_requests, [
+            ('GET', '/workspaces'),
+            ('GET', '/groups'),
+        ])

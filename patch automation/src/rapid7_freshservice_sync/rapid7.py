@@ -33,6 +33,7 @@ class Rapid7SolutionClient:
         )
         self._solutions: dict[str, dict[str, Any]] = {}
         self._vulnerabilities: dict[str, list[dict[str, Any]]] = {}
+        self._asset_vulnerability_proofs: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     def get_vulnerability_solutions(self, vulnerability_id: str) -> list[dict[str, Any]]:
         if vulnerability_id not in self._vulnerabilities:
@@ -44,12 +45,50 @@ class Rapid7SolutionClient:
                 if not isinstance(solution_id, str) or not solution_id:
                     raise ValueError("Rapid7 returned an invalid solution ID")
                 if solution_id not in self._solutions:
-                    self._solutions[solution_id] = self.http.request_json(
+                    solution = self.http.request_json(
                         "GET", f"{self.base_url}/solutions/{quote(solution_id, safe='')}"
                     )
+                    if not isinstance(solution, dict):
+                        raise ValueError("Rapid7 returned an invalid solution")
+                    self._solutions[solution_id] = {**solution, "id": solution_id}
                 solutions.append(self._solutions[solution_id])
             self._vulnerabilities[vulnerability_id] = solutions
         return self._vulnerabilities[vulnerability_id]
+
+    def get_asset_vulnerability_proof(
+        self, asset_id: str, vulnerability_id: str
+    ) -> list[dict[str, Any]]:
+        key = (str(asset_id), vulnerability_id)
+        if key not in self._asset_vulnerability_proofs:
+            payload = self.http.request_json(
+                "GET",
+                f"{self.base_url}/assets/{quote(key[0], safe='')}/vulnerabilities/"
+                f"{quote(vulnerability_id, safe='')}",
+            )
+            if not isinstance(payload, dict):
+                raise ValueError("Rapid7 returned an invalid asset vulnerability")
+            results = payload.get("results", [])
+            if not isinstance(results, list):
+                raise ValueError("Rapid7 returned invalid asset vulnerability results")
+            proofs = []
+            for result in results:
+                if not isinstance(result, dict):
+                    raise ValueError("Rapid7 returned an invalid vulnerability result")
+                status = str(result.get("status") or "")
+                if not status.lower().startswith("vulnerable"):
+                    continue
+                proof = result.get("proof") or ""
+                if not isinstance(proof, str):
+                    raise ValueError("Rapid7 returned invalid vulnerability proof text")
+                if not proof.strip():
+                    continue
+                proofs.append({
+                    "check_id": str(result.get("checkId") or ""),
+                    "status": status,
+                    "proof": proof,
+                })
+            self._asset_vulnerability_proofs[key] = proofs
+        return self._asset_vulnerability_proofs[key]
 
 
 class Rapid7Client(Rapid7SolutionClient):

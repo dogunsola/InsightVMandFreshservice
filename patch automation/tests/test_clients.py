@@ -1,7 +1,11 @@
 import unittest
 from unittest.mock import Mock
 
-from rapid7_freshservice_sync.freshservice import FreshserviceClient, finding_tag
+from rapid7_freshservice_sync.freshservice import (
+    FreshserviceClient,
+    _ticket_description,
+    finding_tag,
+)
 from rapid7_freshservice_sync.http import ApiError, HttpClient
 from rapid7_freshservice_sync.models import Finding
 from rapid7_freshservice_sync.rapid7 import Rapid7Client
@@ -74,6 +78,11 @@ class ClientTests(unittest.TestCase):
         http.request_json.side_effect = [
             {"tickets": [], "total": 0},
             {"tickets": [], "total": 0},
+            {"workspaces": [{
+                "id": 7,
+                "name": "IT, Banking Support & Marketing",
+            }]},
+            {"groups": [{"id": 12, "name": "Service Desk"}]},
             {"ticket": {"id": 123, "status": 2}},
         ]
         client = FreshserviceClient(
@@ -88,11 +97,25 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(calls[0].args, ("GET", "https://example.freshservice.com/api/v2/tickets/filter"))
         self.assertEqual(calls[0].kwargs["params"]["query"], f"tag: '{finding_tag(finding)}' AND status:2")
         self.assertEqual(calls[1].kwargs["params"]["query"], f"tag: '{finding_tag(finding)}' AND status:3")
-        self.assertEqual(calls[2].kwargs["json_body"]["email"], "security@example.com")
-        self.assertEqual(calls[2].kwargs["json_body"]["status"], 2)
-        self.assertEqual(calls[2].kwargs["json_body"]["priority"], 3)
-        self.assertIn(finding_tag(finding), calls[2].kwargs["json_body"]["tags"])
-        self.assertFalse(calls[2].kwargs["retryable"])
+        self.assertEqual(calls[2].args, ("GET", "https://example.freshservice.com/api/v2/workspaces"))
+        self.assertEqual(calls[2].kwargs["params"], {"page": 1, "per_page": 100})
+        self.assertEqual(calls[3].args, ("GET", "https://example.freshservice.com/api/v2/groups"))
+        self.assertEqual(calls[3].kwargs["params"], {
+            "workspace_id": 7, "page": 1, "per_page": 100,
+        })
+        payload = calls[4].kwargs["json_body"]
+        self.assertEqual(payload["email"], "security@example.com")
+        self.assertEqual(payload["subject"], "Upgrade")
+        self.assertEqual(payload["status"], 2)
+        self.assertEqual(payload["urgency"], 2)
+        self.assertEqual(payload["impact"], 2)
+        self.assertEqual(payload["priority"], 2)
+        self.assertEqual(payload["workspace_id"], 7)
+        self.assertEqual(payload["group_id"], 12)
+        self.assertEqual(payload["category"], "Digital Security")
+        self.assertEqual(payload["sub_category"], "Vulnerability Management")
+        self.assertIn(finding_tag(finding), payload["tags"])
+        self.assertFalse(calls[4].kwargs["retryable"])
         self.assertEqual(client.http, http)
 
     def test_freshservice_skips_matching_open_ticket(self) -> None:
@@ -106,6 +129,36 @@ class ClientTests(unittest.TestCase):
             client.create_ticket_if_missing(Finding(("host.example.com",), "Upgrade", "Install 2.0"))
         )
         self.assertEqual(http.request_json.call_count, 1)
+
+    def test_freshservice_requires_the_configured_workspace(self) -> None:
+        http = Mock()
+        http.request_json.side_effect = [
+            {"tickets": [], "total": 0},
+            {"tickets": [], "total": 0},
+            {"workspaces": []},
+        ]
+        client = FreshserviceClient(
+            "https://example.freshservice.com", "api-key", "security@example.com", http=http
+        )
+
+        with self.assertRaisesRegex(ApiError, "workspace named"):
+            client.create_ticket_if_missing(Finding(("host.example.com",), "Upgrade", "Install 2.0"))
+        self.assertEqual(http.request_json.call_count, 3)
+
+    def test_ticket_description_omits_proof_section_above_threshold(self) -> None:
+        description = _ticket_description(
+            Finding(
+                ("host.example.com",),
+                "Upgrade",
+                "Install 2.0",
+                vulnerability_count=6,
+                proof_note="Proof lookup skipped: over limit.",
+            )
+        )
+
+        self.assertIn("<h2>Rapid7 Remediation Details</h2>", description)
+        self.assertIn("host.example.com", description)
+        self.assertNotIn("<h2>Rapid7 Proof by Asset</h2>", description)
 
     def test_freshservice_domain_and_credentials_are_validated(self) -> None:
         for domain in (

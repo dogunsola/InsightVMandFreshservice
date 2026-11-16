@@ -5,9 +5,15 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .http import ApiError, HttpClient
-from .models import Finding
+from .models import AffectedAsset, Finding, MAX_PROOF_VULNERABILITIES
 
 OPEN_STATUSES = (2, 3)
+WORKSPACE_NAME = "IT, Banking Support & Marketing"
+GROUP_NAME = "Service Desk"
+TICKET_CATEGORY = "Digital Security"
+TICKET_SUB_CATEGORY = "Vulnerability Management"
+MEDIUM = 2
+RESOURCE_PAGE_SIZE = 100
 
 
 class FreshserviceClient:
@@ -46,6 +52,8 @@ class FreshserviceClient:
             },
             allowed_hosts={parsed.hostname},
         )
+        self._workspace_id: int | None = None
+        self._group_id: int | None = None
 
     def create_ticket_if_missing(self, finding: Finding) -> dict[str, Any] | None:
         tag = finding_tag(finding)
@@ -61,12 +69,19 @@ class FreshserviceClient:
             if tickets:
                 return None
 
+        workspace_id, group_id = self._ticket_routing_ids()
         payload = {
             "email": self.requester_email,
             "subject": _ticket_subject(finding.solution),
             "description": _ticket_description(finding),
-            "priority": 3,
+            "urgency": MEDIUM,
+            "impact": MEDIUM,
+            "priority": MEDIUM,
             "status": 2,
+            "workspace_id": workspace_id,
+            "group_id": group_id,
+            "category": TICKET_CATEGORY,
+            "sub_category": TICKET_SUB_CATEGORY,
             "tags": ["rapid7-insightvm", tag],
         }
         response = self.http.request_json(
@@ -80,27 +95,143 @@ class FreshserviceClient:
             raise ApiError("Freshservice ticket creation returned an invalid response")
         return ticket
 
+    def _ticket_routing_ids(self) -> tuple[int, int]:
+        if self._workspace_id is None:
+            self._workspace_id = self._find_resource_id(
+                "/workspaces", "workspaces", WORKSPACE_NAME
+            )
+        if self._group_id is None:
+            self._group_id = self._find_resource_id(
+                "/groups",
+                "groups",
+                GROUP_NAME,
+                params={"workspace_id": self._workspace_id},
+            )
+        return self._workspace_id, self._group_id
+
+    def _find_resource_id(
+        self,
+        path: str,
+        resource_key: str,
+        name: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> int:
+        resources = self._list_resources(path, resource_key, params=params)
+        matches = [resource for resource in resources if resource.get("name") == name]
+        if len(matches) != 1:
+            raise ApiError(
+                f"Expected exactly one Freshservice {resource_key[:-1]} named "
+                f"{name!r}; found {len(matches)}"
+            )
+        resource_id = matches[0].get("id")
+        if isinstance(resource_id, bool) or not isinstance(resource_id, (int, str)):
+            raise ApiError(f"Freshservice {resource_key[:-1]} {name!r} has an invalid ID")
+        if isinstance(resource_id, str) and not resource_id.isdecimal():
+            raise ApiError(f"Freshservice {resource_key[:-1]} {name!r} has an invalid ID")
+        parsed_id = int(resource_id)
+        if parsed_id <= 0:
+            raise ApiError(f"Freshservice {resource_key[:-1]} {name!r} has an invalid ID")
+        return parsed_id
+
+    def _list_resources(
+        self,
+        path: str,
+        resource_key: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        page = 1
+        resources: list[dict[str, Any]] = []
+        while True:
+            response = self.http.request_json(
+                "GET",
+                f"{self.base_url}{path}",
+                params={
+                    **(params or {}),
+                    "page": page,
+                    "per_page": RESOURCE_PAGE_SIZE,
+                },
+            )
+            batch = response.get(resource_key) if isinstance(response, dict) else None
+            if not isinstance(batch, list) or any(
+                not isinstance(resource, dict) for resource in batch
+            ):
+                raise ApiError(f"Freshservice {resource_key} list returned an invalid response")
+            resources.extend(batch)
+            if len(batch) < RESOURCE_PAGE_SIZE:
+                return resources
+            page += 1
+
 
 def finding_tag(finding: Finding) -> str:
+    identity = (
+        f"{finding.solution_id}\0{finding.solution}\0{finding.fix_details}"
+        if finding.solution_id
+        else f"{finding.solution}\0{finding.fix_details}"
+    )
     stable_id = hashlib.sha256(
-        f"{finding.solution}\0{finding.fix_details}".encode("utf-8")
+        identity.encode("utf-8")
     ).hexdigest()[:24]
     return f"rapid7-remediation-{stable_id}"
 
 
 def _ticket_subject(solution: str) -> str:
-    subject = f"Rapid7 remediation: {solution or 'Review vulnerability findings'}"
-    return subject[:250]
+    return (solution or "Review vulnerability findings")[:250]
 
 
 def _ticket_description(finding: Finding) -> str:
-    hosts = "".join(f"<li>{html.escape(host)}</li>" for host in finding.hosts)
-    solution = html.escape(finding.solution)
-    fix_details = html.escape(finding.fix_details)
-    return (
-        "<p>Rapid7 InsightVM identified active vulnerability findings requiring "
-        "remediation.</p>"
-        f"<p><strong>Solution:</strong> {solution}</p>"
-        f"<p><strong>Fix details:</strong> {fix_details}</p>"
-        f"<p><strong>Affected hosts:</strong></p><ul>{hosts}</ul>"
+    assets = finding.affected_assets or tuple(
+        AffectedAsset(asset_id="", host=host, ip="") for host in finding.hosts
     )
+    asset_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(asset.asset_id)}</td>"
+        f"<td>{html.escape(asset.host)}</td>"
+        f"<td>{html.escape(asset.ip)}</td>"
+        f"<td>{html.escape(finding.solution_id)}</td>"
+        f"<td>{html.escape(finding.solution)}</td>"
+        f"<td>{html.escape(finding.fix_details)}</td>"
+        "</tr>"
+        for asset in assets
+    )
+    remediation_section = (
+        "<h2>Rapid7 Remediation Details</h2>"
+        "<table><thead><tr>"
+        "<th>Asset ID</th><th>Hostname</th><th>IP Address</th>"
+        "<th>Solution ID</th><th>Solution</th><th>Fix Details</th>"
+        "</tr></thead>"
+        f"<tbody>{asset_rows}</tbody></table>"
+    )
+    proof_section = ""
+    if finding.proofs or (
+        0 < finding.vulnerability_count <= MAX_PROOF_VULNERABILITIES
+    ):
+        if finding.proofs:
+            proof_rows = "".join(
+                "<tr>"
+                f"<td>{html.escape(proof.asset_id)}</td>"
+                f"<td>{html.escape(proof.host)}</td>"
+                f"<td>{html.escape(proof.vulnerability_id)}</td>"
+                f"<td>{html.escape(proof.check_id)}</td>"
+                f"<td>{html.escape(proof.status)}</td>"
+                f"<td><pre>{html.escape(proof.proof)}</pre></td>"
+                "</tr>"
+                for proof in finding.proofs
+            )
+            proof_content = (
+                "<table><thead><tr>"
+                "<th>Asset ID</th><th>Hostname</th><th>Vulnerability ID</th>"
+                "<th>Check ID</th><th>Status</th><th>Proof</th>"
+                "</tr></thead>"
+                f"<tbody>{proof_rows}</tbody></table>"
+            )
+        else:
+            proof_content = (
+                "<p>Rapid7 returned no proof details for this solution's findings.</p>"
+            )
+        proof_section = (
+            "<h2>Rapid7 Proof by Asset</h2>"
+            f"{proof_content}"
+        )
+    return remediation_section + proof_section

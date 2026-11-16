@@ -59,14 +59,25 @@ rapid7-freshservice-sync \
 ```
 
 Ticket creation checks Freshservice for an existing Open or Pending ticket with
-the same deterministic remediation tag before creating a ticket. The tag is
-derived from the remediation solution and fix details, so repeated scheduled
-runs do not create duplicate active tickets for the same remediation group.
-Resolved or Closed tickets do not prevent a new ticket if the finding returns.
+the same deterministic remediation tag before creating a ticket. A separate
+ticket is created for each Rapid7 remediation solution; the tag includes its
+solution ID so distinct solutions remain separate. Repeated scheduled runs do
+not create duplicate active tickets for the same solution. Resolved or Closed
+tickets do not prevent a new ticket if the finding returns.
 
-CSV files contain vulnerability and asset data and are written with owner-only
-permissions. Store exports only in protected locations and follow your retention
-policy.
+Tickets use the configured requester, the remediation solution name as the
+subject, Medium urgency/impact/priority, the `IT, Banking Support & Marketing`
+workspace, the `Service Desk` group, and the `Digital Security` /
+`Vulnerability Management` category and subcategory. Workspace and group IDs
+are resolved by exact name through Freshservice before the first ticket is
+created; missing or ambiguous matches stop ticket creation.
+The ticket description separates a per-asset remediation details table from a
+proof table; the proof section is included only when the solution affects five
+or fewer distinct vulnerabilities.
+
+CSV files contain vulnerability, asset, and proof data and are written with
+owner-only permissions. Store exports only in protected locations and follow
+your retention policy.
 
 ## Azure Pipelines
 
@@ -93,9 +104,16 @@ retained as `high` in the internal catalog. Remediation lookups use
 `GET /api/3/vulnerabilities/{id}/solutions` and
 `GET /api/3/solutions/{id}`; API failures stop the export.
 
-Findings are grouped by solution and fix details, with affected hosts listed in
-the CSV and Freshservice ticket. Missing hostnames are skipped by default; use
-`--hostname-fallback ip` to use an asset IP instead.
+For each remediation solution affecting at most five distinct vulnerabilities,
+the exporter also calls
+`GET /api/3/assets/{assetId}/vulnerabilities/{vulnerabilityId}` and includes
+Rapid7 proof results per asset in the CSV and Freshservice ticket. Proof is not
+retrieved for solutions affecting more than five vulnerabilities; the export
+and ticket state that the threshold was exceeded.
+
+Findings are grouped by solution ID, solution, and fix details, with affected
+hosts listed in the CSV and Freshservice ticket. Missing hostnames are skipped
+by default; use `--hostname-fallback ip` to use an asset IP instead.
 
 ## Azure Key Vault
 

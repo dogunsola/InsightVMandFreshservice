@@ -3,8 +3,9 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
-from rapid7_freshservice_sync.models import Finding
+from rapid7_freshservice_sync.models import AffectedAsset, Finding
 from rapid7_freshservice_sync.transform import (
     build_catalog,
     transform_assets,
@@ -71,12 +72,125 @@ class TransformTests(unittest.TestCase):
                     hosts=("host.example.com", "host2.example.com"),
                     solution="Upgrade",
                     fix_details="Install 2.0",
+                    vulnerability_count=2,
+                    affected_assets=(
+                        AffectedAsset("", "host.example.com", ""),
+                        AffectedAsset("", "host2.example.com", ""),
+                    ),
                 )
             ],
         )
         self.assertEqual(stats.assets_seen, 3)
         self.assertEqual(stats.assets_without_host, 1)
         self.assertEqual(stats.vulnerability_ids_not_in_catalog, 1)
+
+    def test_transform_fetches_proof_per_asset_when_solution_has_at_most_five_vulnerabilities(self) -> None:
+        catalog = {
+            f"vuln-{index}": ("critical", "Example Service", "Upgrade", "Install 2.0")
+            for index in range(1, 6)
+        }
+        assets = [
+            {"id": 10, "host_name": "host-a", "new": [
+                {"vulnerability_id": vulnerability_id} for vulnerability_id in catalog
+            ]},
+            {"id": 20, "host_name": "host-b", "new": [
+                {"vulnerability_id": "vuln-1"},
+            ]},
+        ]
+        solution_lookup = lambda _vulnerability_id: [
+            {"id": "solution-1", "summary": {"text": "Upgrade"}, "steps": {"text": "Install 2.0"}},
+        ]
+        proof_lookup = Mock(side_effect=lambda asset_id, vulnerability_id: [{
+            "check_id": f"check-{vulnerability_id}",
+            "status": "vulnerable-version",
+            "proof": f"{asset_id}:{vulnerability_id}",
+        }])
+
+        findings, _ = transform_assets(
+            assets,
+            catalog,
+            solution_lookup=solution_lookup,
+            proof_lookup=proof_lookup,
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].solution_id, "solution-1")
+        self.assertEqual(findings[0].vulnerability_count, 5)
+        self.assertEqual(
+            {(proof.asset_id, proof.vulnerability_id) for proof in findings[0].proofs},
+            {
+                (asset_id, vulnerability_id)
+                for asset_id, vulnerability_ids in (
+                    ("10", catalog.keys()),
+                    ("20", ("vuln-1",)),
+                )
+                for vulnerability_id in vulnerability_ids
+            },
+        )
+        self.assertEqual(proof_lookup.call_count, 6)
+
+    def test_transform_skips_proof_lookup_for_solutions_with_more_than_five_vulnerabilities(self) -> None:
+        catalog = {
+            f"vuln-{index}": ("critical", "Example Service", "Upgrade", "Install 2.0")
+            for index in range(6)
+        }
+        assets = [{
+            "id": 10,
+            "host_name": "host-a",
+            "new": [{"vulnerability_id": vulnerability_id} for vulnerability_id in catalog],
+        }]
+        solution_lookup = lambda _vulnerability_id: [
+            {"id": "solution-1", "summary": {"text": "Upgrade"}, "steps": {"text": "Install 2.0"}},
+        ]
+        proof_lookup = Mock()
+
+        findings, _ = transform_assets(
+            assets,
+            catalog,
+            solution_lookup=solution_lookup,
+            proof_lookup=proof_lookup,
+        )
+
+        proof_lookup.assert_not_called()
+        self.assertEqual(findings[0].vulnerability_count, 6)
+        self.assertIn("limit: 5", findings[0].proof_note)
+
+    def test_transform_keeps_asset_row_when_rapid7_returns_no_proof(self) -> None:
+        catalog = {"vuln-1": ("critical", "Example Service", "Upgrade", "Install 2.0")}
+        assets = [{"id": 10, "host_name": "host-a", "new": [{"vulnerability_id": "vuln-1"}]}]
+        solution_lookup = lambda _vulnerability_id: [
+            {"id": "solution-1", "summary": {"text": "Upgrade"}, "steps": {"text": "Install 2.0"}},
+        ]
+
+        findings, _ = transform_assets(
+            assets,
+            catalog,
+            solution_lookup=solution_lookup,
+            proof_lookup=lambda _asset_id, _vulnerability_id: [],
+        )
+
+        self.assertEqual(len(findings[0].proofs), 1)
+        self.assertEqual(findings[0].proofs[0].asset_id, "10")
+        self.assertEqual(
+            findings[0].proofs[0].proof,
+            "No proof details returned by Rapid7.",
+        )
+
+    def test_transform_keeps_distinct_solution_ids_separate(self) -> None:
+        catalog = {"vuln-1": ("critical", "Example Service", "Upgrade", "Install 2.0")}
+        assets = [{"id": 10, "host_name": "host-a", "new": [{"vulnerability_id": "vuln-1"}]}]
+        solutions = [
+            {"id": "solution-a", "summary": {"text": "Upgrade"}, "steps": {"text": "Install 2.0"}},
+            {"id": "solution-b", "summary": {"text": "Upgrade"}, "steps": {"text": "Install 2.0"}},
+        ]
+
+        findings, _ = transform_assets(
+            assets,
+            catalog,
+            solution_lookup=lambda _vulnerability_id: solutions,
+        )
+
+        self.assertEqual([finding.solution_id for finding in findings], ["solution-a", "solution-b"])
 
     def test_ip_fallback_and_csv_format(self) -> None:
         findings, _ = transform_assets(
@@ -92,8 +206,8 @@ class TransformTests(unittest.TestCase):
         self.assertEqual(
             rows,
             [
-                ["Hosts", "Solution", "Fix details"],
-                ["10.0.0.2", "Upgrade", "Install 2.0"],
+                ["Hosts", "Solution", "Fix details", "Proof information"],
+                ["10.0.0.2", "Upgrade", "Install 2.0", ""],
             ],
         )
 
@@ -111,7 +225,7 @@ class TransformTests(unittest.TestCase):
             with output.open(newline="", encoding="utf-8") as file:
                 rows = list(csv.reader(file))
             mode = stat.S_IMODE(output.stat().st_mode)
-        self.assertEqual(rows[1], ["host.example.com", "'=cmd|calc", "Install 2.0"])
+        self.assertEqual(rows[1], ["host.example.com", "'=cmd|calc", "Install 2.0", ""])
         self.assertEqual(mode, 0o600)
 
 

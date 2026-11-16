@@ -13,14 +13,37 @@ class SolutionTests(unittest.TestCase):
             {'resources': ['fix/id']}, record, {'resources': ['fix/id']},
         ]
         client = Rapid7SolutionClient('https://console:3780', 'user', 'password', http)
-        self.assertEqual(client.get_vulnerability_solutions('vuln/id'), [record])
-        self.assertEqual(client.get_vulnerability_solutions('vuln/id'), [record])
-        self.assertEqual(client.get_vulnerability_solutions('other'), [record])
+        solution = {**record, 'id': 'fix/id'}
+        self.assertEqual(client.get_vulnerability_solutions('vuln/id'), [solution])
+        self.assertEqual(client.get_vulnerability_solutions('vuln/id'), [solution])
+        self.assertEqual(client.get_vulnerability_solutions('other'), [solution])
         self.assertEqual(http.request_json.call_count, 3)
         self.assertEqual(http.request_json.call_args_list[0].args,
                          ('GET', 'https://console:3780/api/3/vulnerabilities/vuln%2Fid/solutions'))
         self.assertEqual(http.request_json.call_args_list[1].args,
                          ('GET', 'https://console:3780/api/3/solutions/fix%2Fid'))
+
+    def test_asset_vulnerability_proof_uses_v3_detail_endpoint_and_caches(self):
+        http = Mock()
+        http.request_json.return_value = {
+            'results': [
+                {'checkId': 'check-1', 'status': 'vulnerable-version', 'proof': '<p>Version 1</p>'},
+                {'checkId': 'check-2', 'status': 'not-vulnerable', 'proof': 'Not vulnerable'},
+            ],
+        }
+        client = Rapid7SolutionClient('https://console:3780', 'user', 'password', http)
+
+        proof = client.get_asset_vulnerability_proof('asset/id', 'vuln/id')
+        self.assertEqual(proof, [{
+            'check_id': 'check-1',
+            'status': 'vulnerable-version',
+            'proof': '<p>Version 1</p>',
+        }])
+        self.assertEqual(client.get_asset_vulnerability_proof('asset/id', 'vuln/id'), proof)
+        http.request_json.assert_called_once_with(
+            'GET',
+            'https://console:3780/api/3/assets/asset%2Fid/vulnerabilities/vuln%2Fid',
+        )
 
     def test_console_url_and_auth(self):
         for url in ['http://console', 'https://user:pass@console', 'https://console/path', 'https://console?x=1']:

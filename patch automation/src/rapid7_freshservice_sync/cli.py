@@ -124,6 +124,7 @@ def main() -> None:
         catalog,
         hostname_fallback=args.hostname_fallback,
         solution_lookup=rapid7.get_vulnerability_solutions,
+        proof_lookup=rapid7.get_asset_vulnerability_proof,
     )
     args.output = safe_output_path(args.output)
     write_findings_csv(args.output, findings)
@@ -165,10 +166,18 @@ def main() -> None:
             ticket = freshservice.create_ticket_if_missing(finding)
             if ticket is None:
                 skipped += 1
-                LOG.info("Skipping existing open Freshservice ticket for %s", finding.solution)
+                LOG.info(
+                    "Skipping existing open Freshservice ticket for solution %s (%s)",
+                    finding.solution_id or finding.solution,
+                    finding.solution,
+                )
             else:
                 created += 1
-                LOG.info("Created Freshservice ticket id=%s", ticket["id"])
+                LOG.info(
+                    "Created Freshservice ticket id=%s for solution %s",
+                    ticket["id"],
+                    finding.solution_id or finding.solution,
+                )
         LOG.info("Freshservice tickets: created=%s, already-open=%s", created, skipped)
     else:
         LOG.info("Dry run complete; use --create-tickets to create Freshservice tickets")
